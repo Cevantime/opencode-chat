@@ -1,0 +1,200 @@
+{
+  "name": "opencode-diff",
+  "displayName": "OpenCode Diff",
+  "description": "Exécute opencode et présente les modifications dans des vues diff à accepter ou rejeter, comme Copilot.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "main": "./dist/extension.js",
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "activationEvents": [],
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "opencodeDiff.chat",
+        "name": "opencode",
+        "fullName": "OpenCode",
+        "description": "Exécute opencode dans votre workspace et propose les modifications sous forme de diffs à accepter ou rejeter.",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "review",
+            "description": "Exécute une demande avec opencode puis ouvre la revue des diffs proposés."
+          }
+        ]
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "opencodeDiff",
+          "title": "OpenCode Diff",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "opencodeDiff": [
+        {
+          "type": "tree",
+          "id": "opencodeDiff.review",
+          "name": "Revue des modifications"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "opencodeDiff.acceptAll",
+          "when": "view == opencodeDiff.review && opencodeDiff.hasReview",
+          "group": "navigation@1"
+        },
+        {
+          "command": "opencodeDiff.rejectAll",
+          "when": "view == opencodeDiff.review && opencodeDiff.hasReview",
+          "group": "navigation@2"
+        },
+        {
+          "command": "opencodeDiff.clearReview",
+          "when": "view == opencodeDiff.review && opencodeDiff.hasReview",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "opencodeDiff.openChange",
+          "when": "view == opencodeDiff.review && viewItem == opencodeDiff.reviewFile",
+          "group": "inline@1"
+        },
+        {
+          "command": "opencodeDiff.acceptChange",
+          "when": "view == opencodeDiff.review && viewItem == opencodeDiff.reviewFile",
+          "group": "inline@2"
+        },
+        {
+          "command": "opencodeDiff.rejectChange",
+          "when": "view == opencodeDiff.review && viewItem == opencodeDiff.reviewFile",
+          "group": "inline@3"
+        }
+      ],
+      "commandPalette": []
+    },
+    "commands": [
+      {
+        "command": "opencodeDiff.acceptAll",
+        "title": "Tout accepter",
+        "category": "OpenCode Diff",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "opencodeDiff.rejectAll",
+        "title": "Tout rejeter",
+        "category": "OpenCode Diff",
+        "icon": "$(close-all)"
+      },
+      {
+        "command": "opencodeDiff.clearReview",
+        "title": "Effacer la revue",
+        "category": "OpenCode Diff",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "opencodeDiff.focusReview",
+        "title": "Ouvrir la revue des modifications",
+        "category": "OpenCode Diff",
+        "icon": "$(git-pull-request)"
+      },
+      {
+        "command": "opencodeDiff.openChange",
+        "title": "Ouvrir le diff",
+        "category": "OpenCode Diff",
+        "icon": "$(git-compare)"
+      },
+      {
+        "command": "opencodeDiff.acceptChange",
+        "title": "Accepter le fichier",
+        "category": "OpenCode Diff",
+        "icon": "$(check)"
+      },
+      {
+        "command": "opencodeDiff.rejectChange",
+        "title": "Rejeter le fichier",
+        "category": "OpenCode Diff",
+        "icon": "$(discard)"
+      }
+    ],
+    "configuration": {
+      "title": "OpenCode Diff",
+      "properties": {
+        "opencodeDiff.opencodePath": {
+          "type": "string",
+          "default": "opencode",
+          "description": "Chemin du binaire opencode. Par défaut 'opencode' (résolu via PATH, puis ~/.opencode/bin)."
+        },
+        "opencodeDiff.model": {
+          "type": "string",
+          "default": "",
+          "description": "Modèle à utiliser au format provider/model (ex: anthropic/claude-sonnet-4-5). Vide = modèle par défaut d'opencode."
+        },
+        "opencodeDiff.agent": {
+          "type": "string",
+          "default": "",
+          "description": "Agent opencode à utiliser. Vide = agent par défaut."
+        },
+        "opencodeDiff.autoOpenReview": {
+          "type": "boolean",
+          "default": true,
+          "description": "Ouvre automatiquement la vue de revue à la fin d'une exécution produisant des modifications."
+        },
+        "opencodeDiff.allowBash": {
+          "type": "boolean",
+          "default": false,
+          "description": "Autoriser opencode à exécuter des commandes bash. Désactivé par défaut : les effets de bord (installations, serveurs) ne sont pas réversibles par la revue."
+        },
+        "opencodeDiff.webfetchPermission": {
+          "type": "string",
+          "enum": [
+            "allow",
+            "deny"
+          ],
+          "default": "allow",
+          "description": "Autoriser opencode à consulter des pages web."
+        },
+        "opencodeDiff.snapshotSizeLimitMb": {
+          "type": "number",
+          "default": 10,
+          "description": "Taille maximale (Mo) des fichiers conservés pour la restauration. Les fichiers plus gros modifiés par opencode ne pourront pas être restaurés automatiquement."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "package": "vsce package --no-dependencies",
+    "compile": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node esbuild-test.mjs && node --test 'dist-test/*.test.mjs'",
+    "check": "npm run compile"
+  },
+  "dependencies": {
+    "@opencode-ai/sdk": "1.18.16",
+    "diff": "^7.0.0",
+    "ignore": "^6.0.2"
+  },
+  "devDependencies": {
+    "@types/diff": "^5.2.3",
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.100.0",
+    "@vscode/vsce": "^3.2.1",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0",
+    "vscode-uri": "^3.1.0"
+  }
+}
