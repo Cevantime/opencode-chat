@@ -49,7 +49,7 @@ export async function resolveOpencodeBinary(configured?: string): Promise<string
 
   if (!existing.length) {
     throw new Error(
-      `Binaire opencode introuvable. Installez-le (npm i -g opencode-ai, brew install sst/tap/opencode…) ou renseignez le paramètre "opencodeDiff.opencodePath".`,
+      `opencode binary not found. Install it (npm i -g opencode-ai, brew install sst/tap/opencode…) or set the "opencodeDiff.opencodePath" setting.`,
     );
   }
   return existing[0];
@@ -97,7 +97,7 @@ export async function startOpencodeServer(opts: ServerStartOptions): Promise<Ser
   const url = await new Promise<string>((resolve, reject) => {
     const timeout = setTimeout(() => {
       if (!resolved) {
-        reject(new Error(`Délai dépassé au démarrage du serveur opencode.\n${output.slice(-2000)}`));
+        reject(new Error(`Timed out while starting the opencode server.\n${output.slice(-2000)}`));
       }
     }, 20000);
 
@@ -129,7 +129,7 @@ export async function startOpencodeServer(opts: ServerStartOptions): Promise<Ser
     proc.on("exit", (code) => {
       clearTimeout(timeout);
       if (!resolved) {
-        reject(new Error(`Le serveur opencode s'est arrêté (code ${code}).\n${output.slice(-2000)}`));
+        reject(new Error(`The opencode server exited (code ${code}).\n${output.slice(-2000)}`));
       }
     });
     opts.signal?.addEventListener("abort", () => {

@@ -1,31 +1,34 @@
 {
   "name": "opencode-diff",
   "displayName": "OpenCode Diff",
-  "description": "Exécute opencode et présente les modifications dans des vues diff à accepter ou rejeter, comme Copilot.",
+  "description": "Runs opencode and presents the changes in diff views to accept or reject, like Copilot.",
   "version": "0.1.0",
   "publisher": "local",
   "license": "MIT",
   "engines": {
-    "vscode": "^1.100.0"
+    "vscode": "^1.127.0"
   },
   "main": "./dist/extension.js",
   "categories": [
     "AI",
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished",
+    "onLanguageModelChatProvider:opencode"
+  ],
   "contributes": {
     "chatParticipants": [
       {
         "id": "opencodeDiff.chat",
         "name": "opencode",
         "fullName": "OpenCode",
-        "description": "Exécute opencode dans votre workspace et propose les modifications sous forme de diffs à accepter ou rejeter.",
+        "description": "Runs opencode in your workspace and offers the changes as diffs to accept or reject.",
         "isSticky": true,
         "commands": [
           {
             "name": "review",
-            "description": "Exécute une demande avec opencode puis ouvre la revue des diffs proposés."
+            "description": "Runs a request with opencode then opens the review of the proposed diffs."
           }
         ]
       }
@@ -44,10 +47,17 @@
         {
           "type": "tree",
           "id": "opencodeDiff.review",
-          "name": "Revue des modifications"
+          "name": "Change review"
         }
       ]
     },
+    "languageModelChatProviders": [
+      {
+        "vendor": "opencode",
+        "displayName": "OpenCode",
+        "managementCommand": "opencodeDiff.refreshModels"
+      }
+    ],
     "menus": {
       "view/title": [
         {
@@ -64,6 +74,18 @@
           "command": "opencodeDiff.clearReview",
           "when": "view == opencodeDiff.review && opencodeDiff.hasReview",
           "group": "navigation@3"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "opencodeDiff.acceptActiveDiff",
+          "when": "opencodeDiff.activeDiff",
+          "group": "navigation@1"
+        },
+        {
+          "command": "opencodeDiff.rejectActiveDiff",
+          "when": "opencodeDiff.activeDiff",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
@@ -88,45 +110,63 @@
     "commands": [
       {
         "command": "opencodeDiff.acceptAll",
-        "title": "Tout accepter",
+        "title": "Accept All",
         "category": "OpenCode Diff",
         "icon": "$(check-all)"
       },
       {
         "command": "opencodeDiff.rejectAll",
-        "title": "Tout rejeter",
+        "title": "Reject All",
         "category": "OpenCode Diff",
         "icon": "$(close-all)"
       },
       {
         "command": "opencodeDiff.clearReview",
-        "title": "Effacer la revue",
+        "title": "Discard Review",
         "category": "OpenCode Diff",
         "icon": "$(trash)"
       },
       {
         "command": "opencodeDiff.focusReview",
-        "title": "Ouvrir la revue des modifications",
+        "title": "Open Change Review",
         "category": "OpenCode Diff",
         "icon": "$(git-pull-request)"
       },
       {
         "command": "opencodeDiff.openChange",
-        "title": "Ouvrir le diff",
+        "title": "Open Diff",
         "category": "OpenCode Diff",
         "icon": "$(git-compare)"
       },
       {
         "command": "opencodeDiff.acceptChange",
-        "title": "Accepter le fichier",
+        "title": "Accept File",
         "category": "OpenCode Diff",
         "icon": "$(check)"
       },
       {
         "command": "opencodeDiff.rejectChange",
-        "title": "Rejeter le fichier",
+        "title": "Reject File",
         "category": "OpenCode Diff",
         "icon": "$(discard)"
+      },
+      {
+        "command": "opencodeDiff.acceptActiveDiff",
+        "title": "Accept File",
+        "category": "OpenCode Diff",
+        "icon": "$(check)"
+      },
+      {
+        "command": "opencodeDiff.rejectActiveDiff",
+        "title": "Reject File",
+        "category": "OpenCode Diff",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "opencodeDiff.refreshModels",
+        "title": "Refresh Models",
+        "category": "OpenCode Diff",
+        "icon": "$(refresh)"
       }
     ],
     "configuration": {
@@ -135,27 +175,27 @@
         "opencodeDiff.opencodePath": {
           "type": "string",
           "default": "opencode",
-          "description": "Chemin du binaire opencode. Par défaut 'opencode' (résolu via PATH, puis ~/.opencode/bin)."
+          "description": "Path to the opencode binary. Defaults to 'opencode' (resolved via PATH, then ~/.opencode/bin)."
         },
         "opencodeDiff.model": {
           "type": "string",
           "default": "",
-          "description": "Modèle à utiliser au format provider/model (ex: anthropic/claude-sonnet-4-5). Vide = modèle par défaut d'opencode."
+          "description": "Model to use in provider/model format (e.g. anthropic/claude-sonnet-4-5). Empty = opencode's default model."
         },
         "opencodeDiff.agent": {
           "type": "string",
           "default": "",
-          "description": "Agent opencode à utiliser. Vide = agent par défaut."
+          "description": "opencode agent to use. Empty = default agent."
         },
         "opencodeDiff.autoOpenReview": {
           "type": "boolean",
           "default": true,
-          "description": "Ouvre automatiquement la vue de revue à la fin d'une exécution produisant des modifications."
+          "description": "Automatically open the review view when a run produces changes."
         },
         "opencodeDiff.allowBash": {
           "type": "boolean",
           "default": false,
-          "description": "Autoriser opencode à exécuter des commandes bash. Désactivé par défaut : les effets de bord (installations, serveurs) ne sont pas réversibles par la revue."
+          "description": "Allow opencode to run bash commands. Disabled by default: side effects (installations, servers) are not reversible by the review."
         },
         "opencodeDiff.webfetchPermission": {
           "type": "string",
@@ -164,12 +204,12 @@
             "deny"
           ],
           "default": "allow",
-          "description": "Autoriser opencode à consulter des pages web."
+          "description": "Allow opencode to fetch web pages."
         },
         "opencodeDiff.snapshotSizeLimitMb": {
           "type": "number",
           "default": 10,
-          "description": "Taille maximale (Mo) des fichiers conservés pour la restauration. Les fichiers plus gros modifiés par opencode ne pourront pas être restaurés automatiquement."
+          "description": "Maximum size (MB) of files kept for restoration. Larger files modified by opencode cannot be restored automatically."
         }
       }
     }

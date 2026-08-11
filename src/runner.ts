@@ -59,7 +59,7 @@ async function watchEvents(
             })
             .catch(() => {});
           const title = String(permission.title ?? tool);
-          hooks.onProgress?.(`${allow ? "Autorisé" : "Refusé"} : ${title}`);
+          hooks.onProgress?.(`${allow ? "Allowed" : "Denied"}: ${title}`);
         }
       }
     }
@@ -101,14 +101,14 @@ export async function runOpencode(
   let snapshot: Awaited<ReturnType<typeof createSnapshot>> | undefined;
 
   try {
-    hooks.onProgress?.("Capture de l'instantané du workspace…");
+    hooks.onProgress?.("Snapshotting the workspace…");
     snapshot = await createSnapshot(opts.workspaceRoot, storeDir, {
       sizeLimitBytes: opts.snapshotSizeLimitBytes,
     });
 
     const created = await client.session.create({ query: { directory: opts.workspaceRoot } });
     sessionID = created.data?.id ?? "";
-    if (!sessionID) throw new Error("opencode n'a pas retourné de session.");
+    if (!sessionID) throw new Error("opencode returned no session.");
 
     void watchEvents(
       client,
@@ -124,7 +124,7 @@ export async function runOpencode(
     if (opts.model) body.model = opts.model;
     if (opts.agent) body.agent = opts.agent;
 
-    hooks.onProgress?.("Lancement d'opencode…");
+    hooks.onProgress?.("Starting opencode…");
     const abortSession = () => {
       void client.session.abort({ path: { id: sessionID } }).catch(() => {});
     };
@@ -135,21 +135,21 @@ export async function runOpencode(
       result = await client.session.prompt({ path: { id: sessionID }, body: body as never });
     } catch (err) {
       if (opts.signal?.aborted) throw new Error("aborted");
-      throw new Error(`Échec de l'appel opencode : ${String(err)}`);
+      throw new Error(`opencode call failed: ${String(err)}`);
     }
     opts.signal?.removeEventListener("abort", abortSession);
 
     if (result.error) {
       const data = (result.error as { data?: { message?: string } }).data;
-      throw new Error(data?.message ?? "Échec de l'appel opencode.");
+      throw new Error(data?.message ?? "opencode call failed.");
     }
 
-    hooks.onProgress?.("Analyse des modifications…");
+    hooks.onProgress?.("Analyzing changes…");
     const changes = await computeChanges(snapshot, storeDir);
 
-    // Le workspace reste modifié (modèle Copilot) : le diff compare l'original
-    // (instantané) au contenu modifié. Accepter garde l'état courant, rejeter
-    // restaure l'original via revertFileChange.
+    // The workspace stays modified (Copilot-style): the diff compares the
+    // original (snapshot) against the modified content. Accepting keeps the
+    // current state, rejecting restores the original via revertFileChange.
 
     const reply = await extractReply(client, sessionID);
     const fileChanges = await toFileChanges(changes);
