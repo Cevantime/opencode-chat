@@ -58,6 +58,16 @@
         "managementCommand": "opencodeDiff.refreshModels"
       }
     ],
+    "colors": [
+      {
+        "id": "opencodeDiff.pendingForeground",
+        "description": "Color of the pending-review badge (R) shown next to files modified by opencode.",
+        "defaults": {
+          "light": "#d29922",
+          "dark": "#d29922"
+        }
+      }
+    ],
     "menus": {
       "view/title": [
         {
@@ -78,14 +88,24 @@
       ],
       "editor/title": [
         {
+          "command": "opencodeDiff.acceptActiveSegment",
+          "when": "opencodeDiff.activeSegment",
+          "group": "navigation@1"
+        },
+        {
+          "command": "opencodeDiff.rejectActiveSegment",
+          "when": "opencodeDiff.activeSegment",
+          "group": "navigation@2"
+        },
+        {
           "command": "opencodeDiff.acceptActiveDiff",
           "when": "opencodeDiff.activeDiff",
-          "group": "navigation@1"
+          "group": "navigation@3"
         },
         {
           "command": "opencodeDiff.rejectActiveDiff",
           "when": "opencodeDiff.activeDiff",
-          "group": "navigation@2"
+          "group": "navigation@4"
         }
       ],
       "view/item/context": [
@@ -151,6 +171,18 @@
         "icon": "$(discard)"
       },
       {
+        "command": "opencodeDiff.acceptActiveSegment",
+        "title": "Accept Segment",
+        "category": "OpenCode Diff",
+        "icon": "$(check)"
+      },
+      {
+        "command": "opencodeDiff.rejectActiveSegment",
+        "title": "Reject Segment",
+        "category": "OpenCode Diff",
+        "icon": "$(discard)"
+      },
+      {
         "command": "opencodeDiff.acceptActiveDiff",
         "title": "Accept File",
         "category": "OpenCode Diff",
@@ -177,20 +209,40 @@
           "default": "opencode",
           "description": "Path to the opencode binary. Defaults to 'opencode' (resolved via PATH, then ~/.opencode/bin)."
         },
-        "opencodeDiff.model": {
-          "type": "string",
-          "default": "",
-          "description": "Model to use in provider/model format (e.g. anthropic/claude-sonnet-4-5). Empty = opencode's default model."
-        },
+            "opencodeDiff.model": {
+              "type": "string",
+              "default": "",
+              "description": "Model to use in provider/model format (e.g. anthropic/claude-sonnet-4-5). Empty = opencode's default model."
+            },
         "opencodeDiff.agent": {
           "type": "string",
           "default": "",
           "description": "opencode agent to use. Empty = default agent."
         },
-        "opencodeDiff.autoOpenReview": {
+        "opencodeDiff.mode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "build",
+            "plan"
+          ],
+          "default": "auto",
+          "description": "Mode opencode runs in. auto follows the VS Code chat mode (plan when the Plan agent is active), plan forces the read-only plan agent, build forces the default build agent."
+        },
+          "opencodeDiff.autoOpenReview": {
+            "type": "boolean",
+            "default": true,
+            "description": "Automatically open the review view when a run produces changes."
+          },
+            "opencodeDiff.newSession": {
+              "type": "boolean",
+              "default": true,
+              "description": "Start a new opencode session for each new VS Code chat session (conversation context is preserved across prompts within the same chat). Set to false to reuse a single opencode session across all chats."
+            },
+          "opencodeDiff.openDiffOnClick": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically open the review view when a run produces changes."
+          "description": "Open the diff editor instead of the plain file when clicking a file under review in the Explorer, and convert already-open plain-file tabs to diffs when a review is created. Disable to open files normally (inline diff decorations still apply)."
         },
         "opencodeDiff.allowBash": {
           "type": "boolean",

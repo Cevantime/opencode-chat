@@ -15,6 +15,8 @@ export interface SnapshotEntry {
   hash: string;
   size: number;
   binary: boolean;
+  /** mtime of the file when it was snapshotted, used for cheap dirty checks. */
+  mtimeMs: number;
 }
 
 export interface Snapshot {
@@ -130,7 +132,7 @@ export async function createSnapshot(
         continue;
       }
       if (stat.size === 0) {
-        entries.set(rel, { hash: "empty", size: 0, binary: false });
+        entries.set(rel, { hash: "empty", size: 0, binary: false, mtimeMs: stat.mtimeMs });
         continue;
       }
       let buffer: Buffer;
@@ -141,7 +143,7 @@ export async function createSnapshot(
       }
       const hash = sha256(buffer);
       await fs.writeFile(path.join(storeDir, hash), buffer).catch(() => {});
-      entries.set(rel, { hash, size: buffer.length, binary: isBinary(buffer) });
+      entries.set(rel, { hash, size: buffer.length, binary: isBinary(buffer), mtimeMs: stat.mtimeMs });
     }
   };
 
@@ -405,12 +407,11 @@ export function diffLinesFromHunks(before: Buffer, after: Buffer, hunks: Hunk[])
 /** Compute line-level addition/deletion counts from two buffers. */
 export function diffStat(before: Buffer, after: Buffer): { additions: number; deletions: number } {
   if (before.length === 0) {
-    const lines = after.toString("utf8").split("\n");
-    return { additions: after.length === 0 ? 0 : lines.filter((l) => l.length > 0).length, deletions: 0 };
+    if (after.length === 0) return { additions: 0, deletions: 0 };
+    return { additions: countLines(after), deletions: 0 };
   }
   if (after.length === 0) {
-    const lines = before.toString("utf8").split("\n");
-    return { additions: 0, deletions: before.length === 0 ? 0 : lines.filter((l) => l.length > 0).length };
+    return { additions: 0, deletions: countLines(before) };
   }
   try {
     const patch = createTwoFilesPatch("a", "b", before.toString("utf8"), after.toString("utf8"), "", "", {
@@ -426,6 +427,13 @@ export function diffStat(before: Buffer, after: Buffer): { additions: number; de
   } catch {
     return { additions: 0, deletions: 0 };
   }
+}
+
+/** Number of lines in a buffer (every line counts, including blank ones). */
+function countLines(buffer: Buffer): number {
+  const lines = buffer.toString("utf8").split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  return lines.length;
 }
 
 export async function toFileChanges(changes: RawChange[]): Promise<FileChange[]> {
@@ -447,4 +455,223 @@ export async function toFileChanges(changes: RawChange[]): Promise<FileChange[]>
     });
   }
   return result;
+}
+
+function kindFromBuffers(before: Buffer, after: Buffer): ChangeKind {
+  if (after.length === 0 && before.length > 0) return "deleted";
+  if (before.length === 0 && after.length > 0) return "added";
+  return "modified";
+}
+
+/**
+ * Rebase a previously reviewed change onto a newer change for the same file.
+ * The original `before` (captured at the very first run) is kept while `after`
+ * becomes the current disk state, so the cumulative diff and its +n−m indicators
+ * stay exact across several prompts. Stats and hunks are recomputed and the
+ * accepted ranges are reset (the diff moved).
+ */
+export function rebaseFileChange(existing: FileChange, incoming: FileChange): FileChange {
+  const before = existing.before;
+  const after = incoming.after;
+  const stats = diffStat(before, after);
+  return {
+    path: incoming.path || existing.path,
+    relPath: incoming.relPath,
+    kind: rebasedKind(existing, before, after),
+    before,
+    after,
+    additions: stats.additions,
+    deletions: stats.deletions,
+    hunks: computeHunks(before, after),
+    acceptedRanges: [],
+  };
+}
+
+/**
+ * Cumulative kind of a rebased change: a file opencode created stays "added"
+ * even as its content grows (its `before` is still empty), a file that now has
+ * no content after originally having some becomes "deleted", everything else
+ * "modified". The incoming kind is deliberately ignored: it only describes the
+ * delta since the previous prompt, not the state versus the original snapshot.
+ */
+function rebasedKind(existing: FileChange, before: Buffer, after: Buffer): ChangeKind {
+  if (existing.kind === "added") return "added";
+  if (after.length === 0 && before.length > 0) return "deleted";
+  return "modified";
+}
+
+/**
+ * Merge a new batch of changes (a later prompt or a live update) into an
+ * existing review: files already under review keep their original `before`
+ * (see {@link rebaseFileChange}), brand-new files are appended, and files not
+ * touched this time are kept as they are — unless they are no longer under
+ * review ({@link keepUntouched}) or were reverted to their original content.
+ */
+export function mergeFileChanges(
+  existing: Map<string, FileChange>,
+  incoming: FileChange[],
+  keepUntouched?: (relPath: string) => boolean,
+): FileChange[] {
+  const merged = new Map(existing);
+  for (const change of incoming) {
+    const prev = merged.get(change.relPath);
+    const rebased = prev
+      ? rebaseFileChange(prev, change)
+      : { ...change, kind: kindFromBuffers(change.before, change.after) };
+    if (rebased.before.equals(rebased.after)) {
+      merged.delete(change.relPath); // the file went back to its original content
+    } else {
+      merged.set(change.relPath, rebased);
+    }
+  }
+  if (keepUntouched) {
+    const incomingPaths = new Set(incoming.map((c) => c.relPath));
+    for (const relPath of [...merged.keys()]) {
+      if (incomingPaths.has(relPath)) continue;
+      if (!keepUntouched(relPath)) merged.delete(relPath);
+    }
+  }
+  return [...merged.values()];
+}
+
+/**
+ * Cheap stat-only scan telling whether the workspace differs from the snapshot
+ * (different size/mtime, new or deleted files). Used as a polling fallback by
+ * {@link watchWorkspace} on platforms where recursive fs.watch is unavailable.
+ */
+async function quickDirtyCheck(snapshot: Snapshot): Promise<boolean> {
+  const root = snapshot.root;
+  const ig = buildIgnore(root);
+  const seen = new Set<string>();
+  let dirty = false;
+
+  const walk = async (dir: string): Promise<void> => {
+    if (dirty) return;
+    let items: fsSync.Dirent[];
+    try {
+      items = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      dirty = true;
+      return;
+    }
+    for (const item of items) {
+      if (dirty) return;
+      const full = path.join(dir, item.name);
+      const rel = path.relative(root, full).split(path.sep).join("/");
+      if (ig.ignores(rel)) continue;
+      if (await isDir(item, full)) {
+        await walk(full);
+        continue;
+      }
+      if (!item.isFile()) continue;
+      seen.add(rel);
+      const entry = snapshot.entries.get(rel);
+      let stat;
+      try {
+        stat = await fs.stat(full);
+      } catch {
+        dirty = true;
+        return;
+      }
+      if (!entry || entry.size !== stat.size || entry.mtimeMs !== stat.mtimeMs) {
+        dirty = true;
+        return;
+      }
+    }
+  };
+
+  await walk(root);
+  if (dirty) return true;
+  for (const rel of snapshot.entries.keys()) {
+    if (!seen.has(rel)) return true; // a snapshotted file was deleted
+  }
+  return false;
+}
+
+export interface LiveChangeWatcher {
+  dispose(): void;
+}
+
+export interface WatchWorkspaceOptions {
+  /** Debounce after a watch event before recomputing the changes. */
+  debounceMs?: number;
+  /** Interval of the stat-only dirty-check polling. */
+  pollMs?: number;
+}
+
+/**
+ * Watch the workspace while opencode is running and emit the files that differ
+ * from the snapshot, so the review (and its R badges) can be updated live. Uses
+ * recursive fs.watch (debounced) plus a cheap stat poll as a fallback. The
+ * watcher must be disposed when the run ends.
+ */
+export function watchWorkspace(
+  snapshot: Snapshot,
+  storeDir: string,
+  onChange: (changes: FileChange[]) => void,
+  opts: WatchWorkspaceOptions = {},
+): LiveChangeWatcher {
+  const { debounceMs = 400, pollMs = 1500 } = opts;
+  let disposed = false;
+  let timer: NodeJS.Timeout | undefined;
+  let computing = false;
+  let dirty = false;
+
+  const compute = async (): Promise<void> => {
+    if (disposed) return;
+    if (computing) {
+      dirty = true;
+      return;
+    }
+    computing = true;
+    try {
+      const changes = await computeChanges(snapshot, storeDir);
+      const fileChanges = await toFileChanges(changes);
+      if (disposed) return;
+      if (fileChanges.length > 0) onChange(fileChanges);
+    } catch {
+      // transient (file deleted mid-read) — ignore
+    } finally {
+      computing = false;
+      if (dirty && !disposed) {
+        dirty = false;
+        timer = setTimeout(() => {
+          timer = undefined;
+          void compute();
+        }, debounceMs);
+      }
+    }
+  };
+
+  const schedule = (): void => {
+    if (disposed || timer) return;
+    timer = setTimeout(() => {
+      timer = undefined;
+      void compute();
+    }, debounceMs);
+  };
+
+  let watcher: fsSync.FSWatcher | undefined;
+  try {
+    watcher = fsSync.watch(snapshot.root, { recursive: true }, () => schedule());
+    watcher.on("error", () => schedule());
+  } catch {
+    watcher = undefined;
+  }
+
+  const poll = setInterval(() => {
+    if (disposed) return;
+    void quickDirtyCheck(snapshot).then((isDirty) => {
+      if (isDirty && !disposed) schedule();
+    });
+  }, pollMs);
+
+  return {
+    dispose(): void {
+      disposed = true;
+      if (timer) clearTimeout(timer);
+      clearInterval(poll);
+      watcher?.close();
+    },
+  };
 }

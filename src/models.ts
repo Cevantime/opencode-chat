@@ -66,6 +66,21 @@ export class OpencodeModelProvider implements vscode.LanguageModelChatProvider {
     this.changeEmitter.fire();
   }
 
+  /**
+   * True when opencode itself knows the model (exact `provider/model` match
+   * against `opencode models`). Used to decide whether a pick from the chat
+   * model selector can actually be run — opencode is the authority.
+   */
+   async isKnown(modelID: string): Promise<boolean> {
+     const models = await this.listModels();
+     return models.some((m) => `${m.providerID}/${m.modelID}` === modelID);
+   }
+
+   async resolveOpenCodeModel(modelID: string): Promise<OpenCodeModel | undefined> {
+     const models = await this.listModels();
+     return models.find((m) => `${m.providerID}/${m.modelID}` === modelID);
+   }
+
   private async listModels(): Promise<OpenCodeModel[]> {
     const now = Date.now();
     if (this.cache && now - this.cache.at < MODELS_CACHE_MS) return this.cache.models;
@@ -91,29 +106,9 @@ export class OpencodeModelProvider implements vscode.LanguageModelChatProvider {
   }
 
   /**
-   * Maps a model picked in VS Code's chat model picker (any vendor, e.g. a
-   * Copilot or Ollama extension model) to a model opencode can use, when one
-   * with the same id/name is available in `opencode models`. Used so a pick of
-   * a local Ollama model ("qwen3.6-coding:latest") runs opencode with
-   * "ollama/qwen3.6-coding" instead of silently falling back to the default.
+   * Stream a direct chat response from an opencode model. A dedicated session
+   * is created for the exchange and removed afterwards.
    */
-  async resolveOpenCodeModel(pickerId: string): Promise<OpenCodeModel | undefined> {
-    const models = await this.listModels();
-    const normalized = pickerId.trim();
-    if (!normalized) return undefined;
-    const withoutTag = normalized.split(":")[0].trim().toLowerCase();
-    for (const candidate of [normalized.toLowerCase(), withoutTag]) {
-      if (!candidate) continue;
-      const full = models.find((m) => `${m.providerID}/${m.modelID}`.toLowerCase() === candidate);
-      if (full) return full;
-      const byModel = models.filter((m) => m.modelID.toLowerCase() === candidate);
-      if (byModel.length > 0) {
-        return byModel.find((m) => m.providerID === "ollama") ?? byModel[0];
-      }
-    }
-    return undefined;
-  }
-
   async provideLanguageModelChatResponse(
     model: vscode.LanguageModelChatInformation,
     messages: readonly vscode.LanguageModelChatRequestMessage[],

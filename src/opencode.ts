@@ -8,6 +8,10 @@ import type { OpencodeClient, Config as OpenCodeConfig } from "@opencode-ai/sdk"
 export interface ServerHandle {
   url: string;
   client: OpencodeClient;
+  /** True once the server process has exited. */
+  died: boolean;
+  /** Called when the server process exits, so callers can invalidate the handle. */
+  onExit?: (code: number | null) => void;
   close(): void;
 }
 
@@ -60,30 +64,44 @@ export interface ServerStartOptions {
   cwd: string;
   allowBash: boolean;
   webfetchPermission: "allow" | "deny";
+  /**
+   * Isolate opencode's data (sessions, DB) into this directory via
+   * OPENCODE_DATA_DIR, so a concurrent opencode instance (e.g. the TUI in the
+   * terminal) cannot corrupt or overwrite this server's context.
+   */
+  dataDir?: string;
   signal?: AbortSignal;
   log?: (line: string) => void;
 }
 
 function buildConfig(opts: ServerStartOptions): OpenCodeConfig {
-  const permission: Record<string, "allow" | "deny"> = {
+  // Permissions that let opencode freely edit are scoped to the `build` agent:
+  // opencode merges the global `permission` config into every agent (last wins),
+  // so a global `edit: allow` would override the `plan` agent's read-only rules.
+  const buildPermission: Record<string, "allow" | "deny"> = {
     edit: "allow",
-    webfetch: opts.webfetchPermission,
     external_directory: "allow",
   };
-  if (opts.allowBash) permission.bash = "allow";
+  if (opts.allowBash) buildPermission.bash = "allow";
   return {
-    permission: { ...permission } as OpenCodeConfig["permission"],
+    permission: { webfetch: opts.webfetchPermission } as OpenCodeConfig["permission"],
+    agent: {
+      build: {
+        permission: { ...buildPermission } as NonNullable<NonNullable<OpenCodeConfig["agent"]>["build"]>["permission"],
+      },
+    },
   };
 }
 
 /** Start a headless opencode server and wait until it is listening. */
 export async function startOpencodeServer(opts: ServerStartOptions): Promise<ServerHandle> {
   const binDir = path.dirname(opts.binary);
-  const env = {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     PATH: [binDir, process.env.PATH].filter(Boolean).join(path.delimiter),
     OPENCODE_CONFIG_CONTENT: JSON.stringify(buildConfig(opts)),
   };
+  if (opts.dataDir) env.OPENCODE_DATA_DIR = opts.dataDir;
 
   const proc = spawn(opts.binary, ["serve", "--hostname=127.0.0.1", "--port=0"], {
     env,
@@ -148,9 +166,10 @@ export async function startOpencodeServer(opts: ServerStartOptions): Promise<Ser
 
   const client = createOpencodeClient({ baseUrl: url });
 
-  return {
+  const handle: ServerHandle = {
     url,
     client,
+    died: false,
     close() {
       try {
         proc.kill("SIGTERM");
@@ -159,4 +178,10 @@ export async function startOpencodeServer(opts: ServerStartOptions): Promise<Ser
       }
     },
   };
+  proc.on("exit", (code) => {
+    handle.died = true;
+    handle.onExit?.(code);
+  });
+
+  return handle;
 }

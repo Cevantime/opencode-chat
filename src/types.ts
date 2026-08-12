@@ -32,11 +32,48 @@ export interface FileChange {
   acceptedRanges: { oldStart: number; oldLines: number }[];
 }
 
+/** One answer choice proposed by opencode. */
+export interface QuestionOption {
+  label: string;
+  description?: string;
+}
+
+/** A question opencode asks the user while a run is in progress. */
+export interface AskedQuestion {
+  question: string;
+  header?: string;
+  options: QuestionOption[];
+  /** Allow several answers to be picked at once. */
+  multiple?: boolean;
+  /** Allow the user to type a custom answer instead of picking an option. */
+  custom?: boolean;
+}
+
+/** A permission opencode asks for mid-run (edit, write, bash, webfetch…). */
+export interface AskedPermission {
+  id: string;
+  tool: string;
+  title: string;
+  metadata: Record<string, unknown>;
+}
+
+/** Answer to a permission prompt: allow this once, always allow, or reject. */
+export type PermissionResponse = "once" | "always" | "reject";
+
 export interface RunOptions {
   workspaceRoot: string;
+  /** Base URL of the opencode server (used to answer pending questions). */
+  baseUrl: string;
   prompt: string;
   model?: { providerID: string; modelID: string };
   agent?: string;
+  /** Reuse an existing opencode session (keeps the conversation context). */
+  sessionID?: string;
+  /**
+   * Read-only run: after opencode finishes, any file it changed is restored to
+   * the snapshot so the workspace ends up untouched (plan mode).
+   */
+  restoreOnComplete?: boolean;
   /** Called for each SSE event coming from the opencode server. */
   onEvent?: (event: unknown) => void;
   /** Called to surface user-facing progress strings (tool calls, permissions…). */

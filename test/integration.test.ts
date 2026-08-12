@@ -56,3 +56,40 @@ test("real opencode run: edits detected and workspace left modified", { skip: SK
   const reverted = await fs.readFile(path.join(root, "src", "math.js"), "utf8");
   assert.equal(reverted, original, "reject must restore the original content");
 });
+
+test("restoreOnComplete leaves the workspace untouched (plan mode)", { skip: SKIP }, async (t) => {
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), "ocx-integration-"));
+  const root = path.join(base, "project");
+  await fs.mkdir(path.join(root, "src"), { recursive: true });
+  const original = "export function add(a, b) {\n  return a + b;\n}\n";
+  await fs.writeFile(path.join(root, "src", "math.js"), original);
+
+  const binary = await resolveOpencodeBinary();
+  const server = await startOpencodeServer({
+    binary,
+    cwd: root,
+    allowBash: false,
+    webfetchPermission: "deny",
+  });
+  t.after(() => server.close());
+
+  const result = await runOpencode(
+    server.client,
+    {
+      workspaceRoot: root,
+      prompt: "Ajoute une fonction subtract(a, b) dans src/math.js. Ne fais rien d'autre.",
+      model: { providerID: "opencode", modelID: "big-pickle" },
+      snapshotSizeLimitBytes: 10 * 1024 * 1024,
+      allowBash: false,
+      webfetchPermission: "deny",
+      restoreOnComplete: true,
+    },
+    {
+      onProgress: (label) => console.log("  ·", label),
+    },
+  );
+
+  const onDisk = await fs.readFile(path.join(root, "src", "math.js"), "utf8");
+  assert.equal(onDisk, original, "plan mode must leave the workspace untouched");
+});
+

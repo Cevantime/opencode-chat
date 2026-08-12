@@ -14,7 +14,10 @@ import {
   applyHunkReject,
   buildDiffLines,
   diffStat,
+  rebaseFileChange,
+  mergeFileChanges,
 } from "../src/snapshot.js";
+import type { FileChange } from "../src/types.js";
 
 async function makeProject(): Promise<{ root: string; store: string }> {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), "ocx-snap-test-"));
@@ -262,4 +265,112 @@ test("buildDiffLines on a deleted file is all deletions", () => {
   const lines = buildDiffLines(Buffer.from("x\ny\n"), Buffer.alloc(0));
   assert.deepEqual(lines.map((l) => l.kind), ["del", "del"]);
   assert.ok(lines.every((l) => l.hunkIndex === 0));
+});
+
+function change(relPath: string, before: string, after: string): FileChange {
+  return {
+    path: `/abs/${relPath}`,
+    relPath,
+    kind: "modified",
+    before: Buffer.from(before),
+    after: Buffer.from(after),
+    additions: 0,
+    deletions: 0,
+    hunks: [],
+    acceptedRanges: [],
+  };
+}
+
+test("rebaseFileChange keeps the original before and accumulates the diff across prompts", () => {
+  const run1 = change("src/a.js", "a\nb\n", "a\nX\nb\n");
+  run1.additions = 1;
+  run1.deletions = 0;
+
+  // Prompt 2 snapshots the post-run-1 state and adds another line.
+  const run2 = change("src/a.js", "a\nX\nb\n", "a\nX\nb\nY\n");
+  run2.additions = 1;
+  run2.deletions = 0;
+
+  const merged = rebaseFileChange(run1, run2);
+  assert.equal(merged.before.toString("utf8"), "a\nb\n", "before must stay the very first original content");
+  assert.equal(merged.after.toString("utf8"), "a\nX\nb\nY\n");
+  assert.equal(merged.additions, 2, "+n−m must reflect the whole cumulative diff");
+  assert.equal(merged.deletions, 0);
+  assert.equal(merged.hunks.length, 2, "both edits must remain separate segments");
+  assert.deepEqual(merged.acceptedRanges, [], "accepted segments reset when the diff moves");
+});
+
+test("rebaseFileChange normalizes the kind after a deleted file is recreated", () => {
+  const deleted = change("src/x.js", "old content\n", "");
+  deleted.kind = "deleted";
+  const recreated = change("src/x.js", "", "new content\n");
+
+  const merged = rebaseFileChange(deleted, recreated);
+  assert.equal(merged.kind, "modified");
+  assert.equal(merged.before.toString("utf8"), "old content\n");
+  assert.equal(merged.after.toString("utf8"), "new content\n");
+  assert.equal(merged.additions, 1);
+  assert.equal(merged.deletions, 1);
+});
+
+test("rebaseFileChange keeps an added file added with the original empty before", () => {
+  const added = change("src/new.js", "", "a\nb\n");
+  added.kind = "added";
+  // A live watch snapshot sees the file mid-writing: before = full current content.
+  const grown = change("src/new.js", "a\nb\n", "a\nb\nc\n");
+
+  const merged = rebaseFileChange(added, grown);
+  assert.equal(merged.kind, "added");
+  assert.equal(merged.before.length, 0, "before must stay empty for a file opencode created");
+  assert.equal(merged.after.toString("utf8"), "a\nb\nc\n");
+  assert.equal(merged.additions, 3, "stats must count the whole new file");
+  assert.equal(merged.deletions, 0);
+});
+
+test("mergeFileChanges keeps untouched files and appends new ones", () => {
+  const existing = new Map<string, FileChange>([
+    ["src/a.js", change("src/a.js", "a\nb\n", "a\nX\nb\n")],
+    ["src/b.js", change("src/b.js", "c\n", "c\nY\n")],
+  ]);
+
+  const merged = mergeFileChanges(existing, [
+    change("src/a.js", "a\nX\nb\n", "a\nX\nb\nZ\n"),
+    change("src/c.js", "", "new file\n"),
+  ]);
+
+  assert.equal(merged.length, 3);
+  const a = merged.find((c) => c.relPath === "src/a.js")!;
+  assert.equal(a.before.toString("utf8"), "a\nb\n");
+  assert.equal(a.after.toString("utf8"), "a\nX\nb\nZ\n");
+  assert.equal(a.additions, 2);
+  assert.ok(merged.some((c) => c.relPath === "src/b.js"), "untouched file must stay in the review");
+  const c = merged.find((c) => c.relPath === "src/c.js")!;
+  assert.equal(c.kind, "added");
+  assert.equal(c.before.length, 0);
+});
+
+test("mergeFileChanges drops a file that went back to its original content", () => {
+  const existing = new Map<string, FileChange>([
+    ["src/a.js", change("src/a.js", "a\nb\n", "a\nX\nb\n")],
+  ]);
+  // The file is now byte-identical to its original before content.
+  const merged = mergeFileChanges(existing, [change("src/a.js", "a\nX\nb\n", "a\nb\n")]);
+  assert.equal(merged.length, 0, "a file reverted to its original must leave the review");
+});
+
+test("mergeFileChanges drops untouched files not covered by keepUntouched", () => {
+  const existing = new Map<string, FileChange>([
+    ["src/prior.js", change("src/prior.js", "p\n", "p\nX\n")],
+    ["src/live.js", change("src/live.js", "l\n", "l\nY\n")],
+  ]);
+  const merged = mergeFileChanges(
+    existing,
+    [],
+    (relPath) => relPath === "src/prior.js",
+  );
+  assert.deepEqual(
+    merged.map((c) => c.relPath),
+    ["src/prior.js"],
+    "only files predating the run must survive a live reconciliation",
+  );
 });
