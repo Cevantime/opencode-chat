@@ -195,6 +195,12 @@
         "icon": "$(discard)"
       },
       {
+        "command": "opencodeDiff.startImplementation",
+        "title": "Start Implementation",
+        "category": "OpenCode Diff",
+        "icon": "$(run)"
+      },
+      {
         "command": "opencodeDiff.refreshModels",
         "title": "Refresh Models",
         "category": "OpenCode Diff",

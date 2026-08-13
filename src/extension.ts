@@ -432,6 +432,33 @@ export function activate(context: vscode.ExtensionContext): void {
   /** opencode session per chat conversation (key = first prompt of the conversation, or "" when sharing one session globally). */
   const sessionIds = new Map<string, string>();
 
+  /**
+   * Context of the most recent plan-mode run. VS Code's built-in plan flow
+   * shows its own "Start implementation" button after a plan, but that handoff
+   * routes to the built-in Copilot/Claude agent — which is not configured here
+   * and returns nothing. Instead the plan response offers our own button that
+   * re-runs the same opencode session in build mode.
+   */
+  interface PlanContext {
+    root: string;
+    sessionKey: string;
+    sessionID: string;
+    prompt: string;
+    model?: { providerID: string; modelID: string };
+  }
+  let lastPlan: PlanContext | undefined;
+  const saveLastPlan = (): void => {
+    if (lastPlan) void context.workspaceState.update("opencodeDiff.lastPlan", lastPlan);
+  };
+  const restoreLastPlan = (): void => {
+    const saved = context.workspaceState.get<PlanContext>("opencodeDiff.lastPlan");
+    if (saved && typeof saved.root === "string" && typeof saved.sessionID === "string") {
+      lastPlan = saved;
+      log.appendLine("[plan] restored last plan context from workspace state");
+    }
+  };
+  restoreLastPlan();
+
   const updateContext = () => {
     void vscode.commands.executeCommand("setContext", "opencodeDiff.hasReview", store.hasAny());
   };
@@ -445,6 +472,133 @@ export function activate(context: vscode.ExtensionContext): void {
     treeDataProvider: reviewTree,
     showCollapseAll: false,
   });
+
+  /**
+   * Run the implementation step of a plan: reuses the plan's opencode session
+   * (so the plan and conversation context carry over), switches to build mode
+   * and presents the resulting changes in the review, exactly like a normal
+   * chat run. Progress is shown in a notification since there is no chat turn
+   * streaming here; permissions fall back to the configured gates.
+   */
+  const implementPlan = async (plan: PlanContext): Promise<void> => {
+    const cfg = getConfig();
+    const controller = new AbortController();
+    currentRun = controller;
+    const preRunReview = store.get(plan.root);
+    const preRunSnapshot = preRunReview ? cloneReview(preRunReview) : undefined;
+    const preRunPaths = new Set(preRunReview ? [...preRunReview.changes.keys()] : []);
+    store.setRunning(plan.root, true);
+    log.appendLine(`[implement] implementing plan (session=${plan.sessionID})`);
+    await vscode.workspace.saveAll(false);
+    try {
+      const server = await serverManager.get(plan.root);
+      const result = await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: "OpenCode: implementing the plan…",
+          cancellable: true,
+        },
+        async (progress, cancelToken) => {
+          const onCancel = () => controller.abort();
+          cancelToken.onCancellationRequested(onCancel);
+          return runOpencode(
+            server.client,
+            {
+              workspaceRoot: plan.root,
+              baseUrl: server.url,
+              prompt: `Now implement the plan you proposed.\n\n${plan.prompt}`,
+              model: plan.model,
+              agent: cfg.agent || undefined,
+              sessionID: plan.sessionID,
+              snapshotSizeLimitBytes: cfg.snapshotSizeLimitBytes,
+              allowBash: cfg.allowBash,
+              webfetchPermission: cfg.webfetchPermission,
+              signal: controller.signal,
+            },
+            {
+              onProgress: (label) => {
+                log.appendLine(`[implement] ${label}`);
+                progress.report({ message: label });
+              },
+              onSession: (sessionID, reused) => {
+                log.appendLine(`[implement] session ${reused ? "reused" : "created"} id=${sessionID}`);
+              },
+              onFilesChanged: (fileChanges) => {
+                log.appendLine(`[implement] live: ${fileChanges.length} file(s): ${fileChanges.map((c) => c.relPath).join(", ")}`);
+                store.merge(plan.root, {
+                  sessionID: plan.sessionID,
+                  messageID: "",
+                  reply: "",
+                  changes: new Map(fileChanges.map((c) => [c.relPath, c])),
+                  createdAt: Date.now(),
+                  running: true,
+                });
+              },
+            },
+          );
+        },
+      );
+      sessionIds.set(plan.sessionKey, result.sessionID);
+      lastPlan = { ...plan, sessionID: result.sessionID };
+      saveLastPlan();
+      if (controller.signal.aborted) {
+        if (preRunSnapshot) store.set(preRunSnapshot);
+        else store.clear(plan.root);
+        log.appendLine("[implement] cancelled — workspace restored");
+        vscode.window.showInformationMessage("OpenCode: implementation cancelled, the workspace was restored.");
+        return;
+      }
+      const review = store.merge(
+        plan.root,
+        {
+          sessionID: result.sessionID,
+          messageID: result.messageID,
+          reply: result.reply,
+          changes: new Map(result.changes.map((c) => [c.relPath, c])),
+          createdAt: Date.now(),
+          running: false,
+        },
+        { keepUntouched: (relPath) => preRunPaths.has(relPath) },
+      );
+      const merged = [...review.changes.values()].sort((a, b) => a.relPath.localeCompare(b.relPath));
+      log.appendLine(`[implement] ${merged.length} change(s) stored for ${plan.root}`);
+      updateContext();
+      if (merged.length > 0) {
+        editorProvider.convertExistingTabs(plan.root);
+        if (cfg.autoOpenReview) {
+          log.appendLine(`[implement] autoOpenReview → showing review, opening ${merged[0].relPath} in the diff editor`);
+          await editorProvider.open(plan.root, merged[0].relPath);
+          await vscode.commands.executeCommand("opencodeDiff.focusReview");
+          const item = reviewTree.firstItem();
+          if (item) {
+            setTimeout(() => {
+              void treeView.reveal(item, { select: true, focus: false });
+            }, 100);
+          }
+        }
+        vscode.window.showInformationMessage(
+          `OpenCode: ${merged.length} file(s) changed — review them in the Change Review view.`,
+        );
+      } else {
+        log.appendLine("[implement] no changes detected");
+        vscode.window.showInformationMessage("OpenCode: the implementation made no changes.");
+      }
+    } catch (err) {
+      const aborted = controller.signal.aborted;
+      log.appendLine(`[implement] ERROR${aborted ? " (cancelled)" : ""}: ${err instanceof Error ? err.message : String(err)}`);
+      if (aborted) {
+        if (preRunSnapshot) store.set(preRunSnapshot);
+        else store.clear(plan.root);
+      } else {
+        vscode.window.showWarningMessage(
+          `OpenCode: implementation failed — ${err instanceof Error ? err.message : String(err)}. Partial changes (if any) are listed in the Change Review view and can be rejected to restore the files.`,
+        );
+      }
+    } finally {
+      currentRun = undefined;
+      store.setRunning(plan.root, false);
+    }
+  };
 
   // A native Source Control repository per workspace root with pending changes,
   // created on demand so the SCM view stays clean when nothing is under review.
@@ -551,6 +705,36 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("opencodeDiff.abort", () => {
       currentRun?.abort();
     }),
+    vscode.commands.registerCommand("opencodeDiff.startImplementation", async () => {
+      const plan = lastPlan;
+      if (!plan) {
+        vscode.window.showInformationMessage(
+          "OpenCode Diff: generate a plan first (Plan mode) before implementing.",
+        );
+        return;
+      }
+      if (currentRun) {
+        vscode.window.showWarningMessage("OpenCode Diff: an opencode run is already in progress. Cancel it first.");
+        return;
+      }
+      // Submit a real user turn ("@opencode start implementation") so the
+      // implementation streams inside the chat exactly like a normal run. The
+      // participant detects this trigger and runs in build mode, reusing the
+      // plan's opencode session. This relies on the chat's own "submit" action
+      // (internal but stable); if it is missing, fall back to a direct run.
+      try {
+        await vscode.commands.executeCommand("workbench.action.chat.focusInput");
+        await vscode.commands.executeCommand("workbench.action.chat.submit", {
+          inputValue: "@opencode start implementation",
+        });
+        log.appendLine("[implement] submitted chat turn: @opencode start implementation");
+      } catch (err) {
+        log.appendLine(
+          `[implement] chat submit unavailable, falling back to a direct run — ${err instanceof Error ? err.message : String(err)}`,
+        );
+        await implementPlan(plan);
+      }
+    }),
     vscode.commands.registerCommand("opencodeDiff.answerQuestion", (requestID: string, labels: string[]) => {
       settleQuestion(requestID, labels);
     }),
@@ -614,9 +798,24 @@ export function activate(context: vscode.ExtensionContext): void {
 
       const cfg = getConfig();
       const root = workspace.uri.fsPath;
+      // Detect the "Implement with opencode" button turn: it submits
+      // "@opencode start implementation" as a real chat turn while the chat is
+      // still in Plan mode. Run it in build mode instead of the read-only plan
+      // agent, reusing the plan's opencode session.
+      const planMode = resolvePlanMode(
+        request as { command?: string; modeInstructions2?: ChatModeInstructions },
+        cfg.mode,
+      );
+      const implementTrigger =
+        planMode && !!lastPlan && /^(?:@\S+\s+)?(start implementation|implement( the plan)?)\b/i.test(request.prompt.trim());
+      const isPlanTurn = planMode && !implementTrigger;
       const firstTurn = context.history[0] as vscode.ChatRequestTurn | undefined;
       const sessionKey = cfg.newSession ? (firstTurn ? firstTurn.prompt : request.prompt) : "";
-      const reusedSession = sessionIds.get(sessionKey);
+      let reusedSession = sessionIds.get(sessionKey);
+      if (implementTrigger && !reusedSession && lastPlan) {
+        reusedSession = lastPlan.sessionID;
+        log.appendLine(`[run] implement — reusing the plan session ${reusedSession}`);
+      }
       log.appendLine(`[run] workspace=${root}`);
       log.appendLine(`[run] sessionKey=${sessionKey ? JSON.stringify(sessionKey.slice(0, 60)) : "(global)"} reuse=${reusedSession ? "yes" : "no"}`);
       log.appendLine(`[run] config=${JSON.stringify(cfg)}`);
@@ -653,15 +852,13 @@ export function activate(context: vscode.ExtensionContext): void {
           `> Running with opencode's **default** model. Pick an opencode model in the picker (top of the chat) to change it.\n\n`,
         );
       }
-      const planMode = resolvePlanMode(
-        request as { command?: string; modeInstructions2?: ChatModeInstructions },
-        cfg.mode,
-      );
-      const agent = planMode ? "plan" : cfg.agent || undefined;
-      if (planMode) {
+      const agent = isPlanTurn ? "plan" : cfg.agent || undefined;
+      if (isPlanTurn) {
         stream.markdown("> Running in **plan** mode — opencode will only propose changes (read-only).\n\n");
+      } else if (implementTrigger) {
+        stream.markdown("> Implementing the plan in **build** mode — the plan conversation carries over.\n\n");
       }
-      log.appendLine(`[run] planMode=${planMode} agent=${agent ?? "default"}`);
+      log.appendLine(`[run] planMode=${planMode} implement=${implementTrigger} agent=${agent ?? "default"}`);
       const controller = new AbortController();
       currentRun = controller;
       token.onCancellationRequested(() => controller.abort());
@@ -684,11 +881,13 @@ export function activate(context: vscode.ExtensionContext): void {
           {
             workspaceRoot: root,
             baseUrl: server.url,
-            prompt: request.prompt,
+            prompt: implementTrigger && lastPlan
+              ? `${request.prompt}\n\nOriginal request that produced the plan:\n${lastPlan.prompt}`
+              : request.prompt,
             model,
             agent,
             sessionID: reusedSession,
-            restoreOnComplete: planMode,
+            restoreOnComplete: isPlanTurn,
             snapshotSizeLimitBytes: cfg.snapshotSizeLimitBytes,
             allowBash: cfg.allowBash,
             webfetchPermission: cfg.webfetchPermission,
@@ -707,7 +906,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 return Promise.resolve(cfg.webfetchPermission === "allow" ? "always" : "reject");
               }
               // Plan mode is read-only: never grant file edits.
-              if (planMode) return Promise.resolve("reject");
+              if (isPlanTurn) return Promise.resolve("reject");
               // Everything else (edit, write, MCP tools…) is asked to the user.
               return askPermission(permission, stream, controller.signal);
             },
@@ -715,7 +914,7 @@ export function activate(context: vscode.ExtensionContext): void {
               log.appendLine(`[session] ${reused ? "reused" : "created"} id=${sessionID}`);
             },
             onFilesChanged: (fileChanges: FileChange[]) => {
-              if (planMode) return; // plan mode is read-only, nothing to review
+              if (isPlanTurn) return; // plan mode is read-only, nothing to review
               log.appendLine(`[live] ${fileChanges.length} file(s) changed so far: ${fileChanges.map((c) => c.relPath).join(", ")}`);
               store.merge(root, {
                 sessionID: reusedSession ?? "",
@@ -739,11 +938,27 @@ export function activate(context: vscode.ExtensionContext): void {
         );
 
         sessionIds.set(sessionKey, result.sessionID);
-        if (planMode) {
+        if (isPlanTurn) {
           // Plan mode is read-only: the workspace was restored, so there is
           // nothing to review. The plan itself was already streamed above.
           log.appendLine("[run] plan mode — no review created");
+          lastPlan = {
+            root,
+            sessionKey,
+            sessionID: result.sessionID,
+            prompt: request.prompt,
+            model,
+          };
+          saveLastPlan();
           stream.markdown("\n\n_Plan generated — no changes were made to your files._");
+          // VS Code's own plan flow shows a "Start implementation" handoff, but
+          // it targets the built-in Copilot/Claude agent, which is not
+          // configured here and would answer with nothing. Offer our own button
+          // that re-runs the same opencode session in build mode instead.
+          stream.markdown(
+            "\n\n_VS Code's built-in “Start implementation” button targets the Copilot agent and won't run opencode — use the button below._",
+          );
+          stream.button({ command: "opencodeDiff.startImplementation", title: "Implement with opencode" });
           return { metadata: { changes: 0, plan: true } };
         }
 
