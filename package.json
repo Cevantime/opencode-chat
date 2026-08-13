@@ -3,7 +3,7 @@
   "displayName": "OpenCode Diff",
   "description": "Runs opencode and presents the changes in diff views to accept or reject, like Copilot.",
   "version": "0.1.0",
-  "publisher": "local",
+  "publisher": "Cevantime",
   "license": "MIT",
   "repository": {
     "type": "git",
