@@ -2,9 +2,10 @@
   "name": "opencode-diff",
   "displayName": "OpenCode Diff",
   "description": "Runs opencode and presents the changes in diff views to accept or reject, like Copilot.",
-  "version": "0.1.0",
+  "version": "0.1.3",
   "publisher": "Cevantime",
   "license": "MIT",
+  "icon": "media/icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/Cevantime/opencode-chat.git"
