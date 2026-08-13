@@ -1,8 +1,8 @@
 {
   "name": "opencode-diff",
-  "displayName": "OpenCode Diff",
+  "displayName": "OpenCode Diff Chat",
   "description": "Runs opencode and presents the changes in diff views to accept or reject, like Copilot.",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "publisher": "Cevantime",
   "license": "MIT",
   "icon": "media/icon.png",
