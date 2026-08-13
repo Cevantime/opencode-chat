@@ -4,6 +4,8 @@ src/**
 test/**
 node_modules/**
 esbuild.mjs
+esbuild-test.mjs
+dist-test/**
 tsconfig.json
 .gitignore
 **/*.map
